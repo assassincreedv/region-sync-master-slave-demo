@@ -1,5 +1,6 @@
 package com.example.regionsync.store;
 
+import com.example.regionsync.model.DataCategory;
 import com.example.regionsync.model.DataItem;
 import com.example.regionsync.model.SyncEvent;
 import org.slf4j.Logger;
@@ -13,41 +14,46 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 /**
- * Thread-safe in-memory data store that maintains both the data items
- * and the event log for synchronization.
- *
- * In a production system, this would be replaced by a real database
- * and a persistent event log (e.g., Kafka, database-backed event store).
+ * 线程安全的内存数据存储。
+ * 维护数据项和同步事件日志。
+ * 生产环境中应替换为真实数据库 + Kafka 等。
  */
 @Component
 public class InMemoryDataStore {
 
     private static final Logger log = LoggerFactory.getLogger(InMemoryDataStore.class);
 
-    /** Primary data storage: key -> DataItem */
+    /** 数据存储: key -> DataItem */
     private final ConcurrentHashMap<String, DataItem> dataStore = new ConcurrentHashMap<>();
 
-    /** Event log for sync replication, ordered by sequence number */
+    /** 同步事件日志（仅记录需要同步的事件，FINANCE 不记录） */
     private final CopyOnWriteArrayList<SyncEvent> eventLog = new CopyOnWriteArrayList<>();
 
-    /** Monotonically increasing sequence number for event ordering */
+    /** 事件序列号 */
     private final AtomicLong sequenceCounter = new AtomicLong(0);
 
     /**
-     * Store a data item and record the sync event.
+     * 存储数据项并记录同步事件。
+     * FINANCE 类数据不记录事件（不跨区同步）。
      */
     public SyncEvent put(DataItem item, SyncEvent.EventType eventType) {
         dataStore.put(item.getKey(), item);
+
+        // FINANCE 数据不同步 — 合规要求
+        if (item.getCategory() == DataCategory.FINANCE) {
+            log.debug("Stored FINANCE item locally (no sync): key={}", item.getKey());
+            return null;
+        }
+
         long seq = sequenceCounter.incrementAndGet();
         SyncEvent event = new SyncEvent(eventType, item, item.getSourceRegion(), seq);
         eventLog.add(event);
-        log.debug("Stored item: key={}, version={}, seq={}", item.getKey(), item.getVersion(), seq);
+        log.debug("Stored item: key={}, category={}, version={}, seq={}",
+                item.getKey(), item.getCategory(), item.getVersion(), seq);
         return event;
     }
 
-    /**
-     * Get a data item by key (excludes soft-deleted items).
-     */
+    /** 按 key 获取（排除已删除） */
     public Optional<DataItem> get(String key) {
         DataItem item = dataStore.get(key);
         if (item != null && !item.isDeleted()) {
@@ -56,25 +62,28 @@ public class InMemoryDataStore {
         return Optional.empty();
     }
 
-    /**
-     * Get a data item by key including deleted items.
-     */
+    /** 按 key 获取（含已删除） */
     public Optional<DataItem> getIncludingDeleted(String key) {
         return Optional.ofNullable(dataStore.get(key));
     }
 
-    /**
-     * Get all non-deleted data items.
-     */
+    /** 获取所有未删除数据 */
     public List<DataItem> getAll() {
         return dataStore.values().stream()
                 .filter(item -> !item.isDeleted())
                 .collect(Collectors.toList());
     }
 
+    /** 按 category 获取所有未删除数据 */
+    public List<DataItem> getAllByCategory(DataCategory category) {
+        return dataStore.values().stream()
+                .filter(item -> !item.isDeleted() && item.getCategory() == category)
+                .collect(Collectors.toList());
+    }
+
     /**
-     * Apply a sync event received from another region.
-     * Uses version-based conflict resolution (higher version wins).
+     * 应用从其他 Region 收到的同步事件。
+     * 版本号高者胜；版本号相同时时间戳新者胜。
      */
     public boolean applySyncEvent(SyncEvent event) {
         DataItem incoming = event.getData();
@@ -82,51 +91,42 @@ public class InMemoryDataStore {
 
         if (existing == null || incoming.getVersion() > existing.getVersion()) {
             dataStore.put(incoming.getKey(), incoming);
-            log.debug("Applied sync event: type={}, key={}, version={}",
-                    event.getType(), incoming.getKey(), incoming.getVersion());
+            log.debug("Applied sync event: type={}, key={}, category={}, version={}",
+                    event.getType(), incoming.getKey(), incoming.getCategory(), incoming.getVersion());
             return true;
         } else if (incoming.getVersion() == existing.getVersion()
                 && incoming.getTimestamp() > existing.getTimestamp()) {
-            // Same version but newer timestamp - last-write-wins
             dataStore.put(incoming.getKey(), incoming);
             log.debug("Applied sync event (LWW): type={}, key={}, version={}",
                     event.getType(), incoming.getKey(), incoming.getVersion());
             return true;
         }
 
-        log.debug("Skipped sync event (stale): type={}, key={}, incoming_v={}, existing_v={}",
-                event.getType(), incoming.getKey(), incoming.getVersion(), existing.getVersion());
+        log.debug("Skipped sync event (stale): key={}, incoming_v={}, existing_v={}",
+                incoming.getKey(), incoming.getVersion(), existing.getVersion());
         return false;
     }
 
-    /**
-     * Get events after the given sequence number (used by slaves to pull new events).
-     */
+    /** 获取指定序列号之后的事件 */
     public List<SyncEvent> getEventsAfter(long afterSequence) {
         return eventLog.stream()
                 .filter(event -> event.getSequenceNumber() > afterSequence)
                 .collect(Collectors.toList());
     }
 
-    /**
-     * Get the current sequence number (latest event sequence).
-     */
+    /** 当前序列号 */
     public long getCurrentSequence() {
         return sequenceCounter.get();
     }
 
-    /**
-     * Get total count of non-deleted items.
-     */
+    /** 未删除数据总数 */
     public long getItemCount() {
         return dataStore.values().stream()
                 .filter(item -> !item.isDeleted())
                 .count();
     }
 
-    /**
-     * Clear all data (used for testing or reset).
-     */
+    /** 清空所有数据（测试用） */
     public void clear() {
         dataStore.clear();
         eventLog.clear();

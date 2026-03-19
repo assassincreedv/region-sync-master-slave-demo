@@ -1,33 +1,68 @@
-version: '3.8'
-
-# Multi-Region Master-Slave Sync Demo
+# ═══════════════════════════════════════════════════════════
+#  Multi-Region Data Ownership Demo (按数据归属划分 Master)
+# ═══════════════════════════════════════════════════════════
 #
-# This docker-compose file simulates 3 region nodes:
-#   - region-master (port 8081): Primary node handling all writes
-#   - region-slave-1 (port 8082): Read replica in "Region 2"
-#   - region-slave-2 (port 8083): Read replica in "Region 3"
+# 3个 Region 节点：NA (总部), EU, CN
 #
-# Usage:
-#   docker-compose up --build
+# 数据归属:
+#   SYSTEM_CONFIG / ROLE_PERMISSION → Master 固定为 NA
+#   JOB / TALENT                   → 各 Region 是自己数据的 Master
+#   FINANCE                        → 各 Region 本地读写，不同步
+#
+# 架构图:
+#                   ┌──────────────────────────────────┐
+#                   │   Global Config Master (NA)       │
+#                   │   system_config, roles, etc.      │
+#                   └──────────────┬───────────────────┘
+#                                  │ Replication
+#                   ┌──────────────┼──────────────┐
+#                   ▼              ▼              ▼
+#           ┌──────────┐   ┌──────────┐   ┌──────────┐
+#           │ EU       │   │ NA       │   │ CN       │
+#           │ Local RW:│   │ Local RW:│   │ Local RW:│
+#           │ EU Jobs  │   │ NA Jobs  │   │ CN Jobs  │
+#           │ EU Talent│   │ NA Talent│   │ CN Talent│
+#           │ Global   │   │ Global   │   │ Global   │
+#           │ RO Slave │   │ RW Master│   │ RO Slave │
+#           └──────────┘   └──────────┘   └──────────┘
 #
 # Test:
-#   1. Write to master:   curl -X POST http://localhost:8081/api/data -H "Content-Type: application/json" -d '{"key":"hello","value":"world"}'
-#   2. Read from slave 1: curl http://localhost:8082/api/data/hello
-#   3. Read from slave 2: curl http://localhost:8083/api/data/hello
+#   1. 在 NA 创建系统配置:
+#      curl -X POST http://localhost:8081/api/data -H "Content-Type: application/json" \
+#        -d '{"key":"sys-config-1","value":"global-setting","category":"SYSTEM_CONFIG","ownerRegion":"NA"}'
+#
+#   2. 在 EU 创建 EU 的 Job:
+#      curl -X POST http://localhost:8082/api/data -H "Content-Type: application/json" \
+#        -d '{"key":"eu-job-001","value":"Engineer in Berlin","category":"JOB","ownerRegion":"EU"}'
+#
+#   3. 在 CN 读取 EU 的 Job (已同步):
+#      curl http://localhost:8083/api/data/eu-job-001
+#
+#   4. 在 EU 尝试创建 NA 的 Job (会自动转发到 NA):
+#      curl -X POST http://localhost:8082/api/data -H "Content-Type: application/json" \
+#        -d '{"key":"na-job-001","value":"Manager in NYC","category":"JOB","ownerRegion":"NA"}'
+#
+#   5. 在 CN 创建本地 Finance (不同步):
+#      curl -X POST http://localhost:8083/api/data -H "Content-Type: application/json" \
+#        -d '{"key":"cn-finance-001","value":"CN Revenue Q1","category":"FINANCE","ownerRegion":"CN"}'
 
 services:
-  region-master:
+  region-na:
     build: .
-    container_name: region-master
+    container_name: region-na
     ports:
       - "8081:8080"
     environment:
       - SERVER_PORT=8080
-      - REGION_ID=region-master
-      - REGION_ROLE=MASTER
-      - SLAVE_URLS=http://region-slave-1:8080,http://region-slave-2:8080
+      - REGION_ID=NA
+      - REGION_CATEGORY_OWNER_MAP_SYSTEM_CONFIG=NA
+      - REGION_CATEGORY_OWNER_MAP_ROLE_PERMISSION=NA
+      - REGION_CATEGORY_OWNER_MAP_JOB=REGIONAL
+      - REGION_CATEGORY_OWNER_MAP_TALENT=REGIONAL
+      - REGION_CATEGORY_OWNER_MAP_FINANCE=REGIONAL
+      - REGION_PEER_URLS_EU=http://region-eu:8080
+      - REGION_PEER_URLS_CN=http://region-cn:8080
       - SYNC_INTERVAL_MS=3000
-      - HEALTH_CHECK_INTERVAL_MS=5000
     networks:
       - region-network
     healthcheck:
@@ -36,42 +71,48 @@ services:
       timeout: 5s
       retries: 3
 
-  region-slave-1:
+  region-eu:
     build: .
-    container_name: region-slave-1
+    container_name: region-eu
     ports:
       - "8082:8080"
     environment:
       - SERVER_PORT=8080
-      - REGION_ID=region-slave-1
-      - REGION_ROLE=SLAVE
-      - MASTER_URL=http://region-master:8080
+      - REGION_ID=EU
+      - REGION_CATEGORY_OWNER_MAP_SYSTEM_CONFIG=NA
+      - REGION_CATEGORY_OWNER_MAP_ROLE_PERMISSION=NA
+      - REGION_CATEGORY_OWNER_MAP_JOB=REGIONAL
+      - REGION_CATEGORY_OWNER_MAP_TALENT=REGIONAL
+      - REGION_CATEGORY_OWNER_MAP_FINANCE=REGIONAL
+      - REGION_PEER_URLS_NA=http://region-na:8080
+      - REGION_PEER_URLS_CN=http://region-cn:8080
       - SYNC_INTERVAL_MS=3000
-      - HEALTH_CHECK_INTERVAL_MS=5000
-      - MAX_HEALTH_CHECK_FAILURES=3
     networks:
       - region-network
     depends_on:
-      region-master:
+      region-na:
         condition: service_healthy
 
-  region-slave-2:
+  region-cn:
     build: .
-    container_name: region-slave-2
+    container_name: region-cn
     ports:
       - "8083:8080"
     environment:
       - SERVER_PORT=8080
-      - REGION_ID=region-slave-2
-      - REGION_ROLE=SLAVE
-      - MASTER_URL=http://region-master:8080
+      - REGION_ID=CN
+      - REGION_CATEGORY_OWNER_MAP_SYSTEM_CONFIG=NA
+      - REGION_CATEGORY_OWNER_MAP_ROLE_PERMISSION=NA
+      - REGION_CATEGORY_OWNER_MAP_JOB=REGIONAL
+      - REGION_CATEGORY_OWNER_MAP_TALENT=REGIONAL
+      - REGION_CATEGORY_OWNER_MAP_FINANCE=REGIONAL
+      - REGION_PEER_URLS_NA=http://region-na:8080
+      - REGION_PEER_URLS_EU=http://region-eu:8080
       - SYNC_INTERVAL_MS=3000
-      - HEALTH_CHECK_INTERVAL_MS=5000
-      - MAX_HEALTH_CHECK_FAILURES=3
     networks:
       - region-network
     depends_on:
-      region-master:
+      region-na:
         condition: service_healthy
 
 networks:

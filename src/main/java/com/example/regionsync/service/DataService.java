@@ -1,6 +1,7 @@
 package com.example.regionsync.service;
 
 import com.example.regionsync.config.RegionConfig;
+import com.example.regionsync.model.DataCategory;
 import com.example.regionsync.model.DataItem;
 import com.example.regionsync.model.SyncEvent;
 import com.example.regionsync.store.InMemoryDataStore;
@@ -12,12 +13,20 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * Service for CRUD operations on data items.
- * Write operations are only allowed on the MASTER node.
- * Read operations are allowed on both MASTER and SLAVE nodes.
+ * 数据服务 — 按数据归属划分 Master 的 CRUD 操作。
  *
- * When a write operation occurs on the master, a SyncEvent is created
- * and pushed to slave regions by the SyncService.
+ * <p>核心规则：
+ * <ul>
+ *   <li>SYSTEM_CONFIG / ROLE_PERMISSION → 全局 Master 固定为 NA，其他 Region 只读</li>
+ *   <li>JOB / TALENT → 各 Region 是自己数据的 Master，其他 Region 只读</li>
+ *   <li>FINANCE → 各 Region 本地读写，不跨区同步（合规要求）</li>
+ * </ul>
+ *
+ * <p>写操作路由逻辑：
+ * <ol>
+ *   <li>本节点是该数据的 owner → 直接本地写入，然后推送给其他 peer</li>
+ *   <li>本节点不是该数据的 owner → 通过 {@link RegionWriteRouter} 转发到 owner region</li>
+ * </ol>
  */
 @Service
 public class DataService {
@@ -35,70 +44,83 @@ public class DataService {
     }
 
     /**
-     * Create a new data item. Only allowed on MASTER.
+     * 本地创建数据（仅当本节点是该数据的 Master 时调用）。
      */
-    public DataItem create(String key, String value) {
-        ensureMaster("CREATE");
-        DataItem item = new DataItem(key, value, regionConfig.getId());
+    public DataItem createLocal(String key, String value, DataCategory category, String ownerRegion) {
+        ensureOwner(category, ownerRegion, "CREATE");
+        DataItem item = new DataItem(key, value, category, ownerRegion);
+        item.setSourceRegion(regionConfig.getId());
         SyncEvent event = dataStore.put(item, SyncEvent.EventType.CREATE);
-        log.info("Created item: key={}, id={}", key, item.getId());
-        syncService.pushEventToSlaves(event);
+        log.info("Created item locally: key={}, category={}, ownerRegion={}", key, category, ownerRegion);
+        if (event != null) {
+            syncService.pushEventToPeers(event);
+        }
         return item;
     }
 
     /**
-     * Update an existing data item. Only allowed on MASTER.
+     * 本地更新数据。
      */
-    public DataItem update(String key, String newValue) {
-        ensureMaster("UPDATE");
+    public DataItem updateLocal(String key, String newValue) {
         Optional<DataItem> existing = dataStore.get(key);
         if (existing.isEmpty()) {
             throw new IllegalArgumentException("Data item not found: " + key);
         }
-        DataItem updated = existing.get().withUpdatedValue(newValue, regionConfig.getId());
+        DataItem item = existing.get();
+        ensureOwner(item.getCategory(), item.getOwnerRegion(), "UPDATE");
+
+        DataItem updated = item.withUpdatedValue(newValue, regionConfig.getId());
         SyncEvent event = dataStore.put(updated, SyncEvent.EventType.UPDATE);
-        log.info("Updated item: key={}, version={}", key, updated.getVersion());
-        syncService.pushEventToSlaves(event);
+        log.info("Updated item locally: key={}, version={}", key, updated.getVersion());
+        if (event != null) {
+            syncService.pushEventToPeers(event);
+        }
         return updated;
     }
 
     /**
-     * Delete a data item (soft delete). Only allowed on MASTER.
+     * 本地删除数据（软删除）。
      */
-    public void delete(String key) {
-        ensureMaster("DELETE");
+    public void deleteLocal(String key) {
         Optional<DataItem> existing = dataStore.get(key);
         if (existing.isEmpty()) {
             throw new IllegalArgumentException("Data item not found: " + key);
         }
-        DataItem deleted = existing.get().asDeleted(regionConfig.getId());
+        DataItem item = existing.get();
+        ensureOwner(item.getCategory(), item.getOwnerRegion(), "DELETE");
+
+        DataItem deleted = item.asDeleted(regionConfig.getId());
         SyncEvent event = dataStore.put(deleted, SyncEvent.EventType.DELETE);
-        log.info("Deleted item: key={}", key);
-        syncService.pushEventToSlaves(event);
+        log.info("Deleted item locally: key={}", key);
+        if (event != null) {
+            syncService.pushEventToPeers(event);
+        }
     }
 
-    /**
-     * Get a data item by key. Allowed on both MASTER and SLAVE.
-     */
+    /** 按 key 读取数据（所有 Region 都可以读本地副本） */
     public Optional<DataItem> get(String key) {
         return dataStore.get(key);
     }
 
-    /**
-     * Get all data items. Allowed on both MASTER and SLAVE.
-     */
+    /** 获取所有数据 */
     public List<DataItem> getAll() {
         return dataStore.getAll();
     }
 
+    /** 按 category 获取数据 */
+    public List<DataItem> getAllByCategory(DataCategory category) {
+        return dataStore.getAllByCategory(category);
+    }
+
     /**
-     * Ensure the current node is the MASTER for write operations.
+     * 确保本节点是该数据的 Owner（Master）。
      */
-    private void ensureMaster(String operation) {
-        if (!regionConfig.isMaster()) {
+    private void ensureOwner(DataCategory category, String ownerRegion, String operation) {
+        if (!regionConfig.isOwnerOf(category, ownerRegion)) {
             throw new UnsupportedOperationException(
-                    operation + " operation not allowed on SLAVE node [" + regionConfig.getId() +
-                    "]. Write operations must be sent to the MASTER node.");
+                    operation + " not allowed on this node [" + regionConfig.getId() +
+                    "] for category=" + category + ", ownerRegion=" + ownerRegion +
+                    ". Write must be routed to the owner region.");
         }
     }
 }
