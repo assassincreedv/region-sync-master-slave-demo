@@ -106,10 +106,13 @@ public class SyncService {
             if (events != null && events.length > 0) {
                 log.info("Pulled {} events from peer [{}] (after seq={})",
                         events.length, peerId, lastSeq.get());
+                long maxSeq = lastSeq.get();
                 for (SyncEvent event : events) {
                     dataStore.applySyncEvent(event);
-                    lastSeq.updateAndGet(current -> Math.max(current, event.getSequenceNumber()));
+                    maxSeq = Math.max(maxSeq, event.getSequenceNumber());
                 }
+                long finalMaxSeq = maxSeq;
+                lastSeq.updateAndGet(current -> Math.max(current, finalMaxSeq));
             }
         } catch (Exception e) {
             log.warn("Failed to pull events from peer [{}] at {}: {}", peerId, peerUrl, e.getMessage());

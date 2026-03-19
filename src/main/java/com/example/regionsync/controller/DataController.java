@@ -74,10 +74,9 @@ public class DataController {
                         java.util.Arrays.toString(DataCategory.values())));
             }
 
-            // 如果未指定 ownerRegion，默认为本节点（适用于 REGIONAL 类型）
+            // 如果未指定 ownerRegion，默认为本节点 ID（适用于 REGIONAL 类型的数据）
             if (ownerRegion == null || ownerRegion.isBlank()) {
-                ownerRegion = writeRouter.shouldWriteLocally(category, null)
-                        ? request.getOrDefault("ownerRegion", "") : "";
+                ownerRegion = dataService.getCurrentRegionId();
             }
 
             // 判断是本地写还是转发

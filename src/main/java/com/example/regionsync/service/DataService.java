@@ -112,6 +112,11 @@ public class DataService {
         return dataStore.getAllByCategory(category);
     }
 
+    /** 获取当前节点 Region ID */
+    public String getCurrentRegionId() {
+        return regionConfig.getId();
+    }
+
     /**
      * 确保本节点是该数据的 Owner（Master）。
      */
