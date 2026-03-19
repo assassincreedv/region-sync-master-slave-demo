@@ -1,0 +1,79 @@
+version: '3.8'
+
+# Multi-Region Master-Slave Sync Demo
+#
+# This docker-compose file simulates 3 region nodes:
+#   - region-master (port 8081): Primary node handling all writes
+#   - region-slave-1 (port 8082): Read replica in "Region 2"
+#   - region-slave-2 (port 8083): Read replica in "Region 3"
+#
+# Usage:
+#   docker-compose up --build
+#
+# Test:
+#   1. Write to master:   curl -X POST http://localhost:8081/api/data -H "Content-Type: application/json" -d '{"key":"hello","value":"world"}'
+#   2. Read from slave 1: curl http://localhost:8082/api/data/hello
+#   3. Read from slave 2: curl http://localhost:8083/api/data/hello
+
+services:
+  region-master:
+    build: .
+    container_name: region-master
+    ports:
+      - "8081:8080"
+    environment:
+      - SERVER_PORT=8080
+      - REGION_ID=region-master
+      - REGION_ROLE=MASTER
+      - SLAVE_URLS=http://region-slave-1:8080,http://region-slave-2:8080
+      - SYNC_INTERVAL_MS=3000
+      - HEALTH_CHECK_INTERVAL_MS=5000
+    networks:
+      - region-network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  region-slave-1:
+    build: .
+    container_name: region-slave-1
+    ports:
+      - "8082:8080"
+    environment:
+      - SERVER_PORT=8080
+      - REGION_ID=region-slave-1
+      - REGION_ROLE=SLAVE
+      - MASTER_URL=http://region-master:8080
+      - SYNC_INTERVAL_MS=3000
+      - HEALTH_CHECK_INTERVAL_MS=5000
+      - MAX_HEALTH_CHECK_FAILURES=3
+    networks:
+      - region-network
+    depends_on:
+      region-master:
+        condition: service_healthy
+
+  region-slave-2:
+    build: .
+    container_name: region-slave-2
+    ports:
+      - "8083:8080"
+    environment:
+      - SERVER_PORT=8080
+      - REGION_ID=region-slave-2
+      - REGION_ROLE=SLAVE
+      - MASTER_URL=http://region-master:8080
+      - SYNC_INTERVAL_MS=3000
+      - HEALTH_CHECK_INTERVAL_MS=5000
+      - MAX_HEALTH_CHECK_FAILURES=3
+    networks:
+      - region-network
+    depends_on:
+      region-master:
+        condition: service_healthy
+
+networks:
+  region-network:
+    driver: bridge

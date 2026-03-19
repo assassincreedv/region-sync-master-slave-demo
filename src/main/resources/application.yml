@@ -1,0 +1,39 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: region-sync-node
+
+region:
+  # Unique identifier for this region node
+  id: ${REGION_ID:region-1}
+  # Role of this node: MASTER or SLAVE
+  role: ${REGION_ROLE:MASTER}
+  # URL of the master node (required for SLAVE nodes)
+  master-url: ${MASTER_URL:}
+  # Comma-separated list of slave node URLs (used by MASTER to push sync events)
+  slave-urls: ${SLAVE_URLS:}
+  # Sync interval in milliseconds for slaves to pull from master
+  sync-interval-ms: ${SYNC_INTERVAL_MS:3000}
+  # Health check interval in milliseconds
+  health-check-interval-ms: ${HEALTH_CHECK_INTERVAL_MS:5000}
+  # Health check timeout in milliseconds
+  health-check-timeout-ms: ${HEALTH_CHECK_TIMEOUT_MS:2000}
+  # Max consecutive health check failures before triggering failover
+  max-health-check-failures: ${MAX_HEALTH_CHECK_FAILURES:3}
+
+logging:
+  level:
+    com.example.regionsync: DEBUG
+  pattern:
+    console: "%d{HH:mm:ss.SSS} [%thread] [%X{regionId}] %-5level %logger{36} - %msg%n"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
