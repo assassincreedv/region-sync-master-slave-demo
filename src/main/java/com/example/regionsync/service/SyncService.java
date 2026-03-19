@@ -59,7 +59,7 @@ public class SyncService {
 
         for (String slaveUrl : slaveUrls) {
             try {
-                String url = slaveUrl.replaceAll("/$", "") + "/api/sync/receive";
+                String url = normalizeUrl(slaveUrl) + "/api/sync/receive";
                 restTemplate.postForObject(url, event, Void.class);
                 log.debug("Pushed event to slave {}: seq={}", slaveUrl, event.getSequenceNumber());
             } catch (Exception e) {
@@ -100,10 +100,9 @@ public class SyncService {
         }
 
         try {
-            String url = masterUrl.replaceAll("/$", "") +
+            String url = normalizeUrl(masterUrl) +
                     "/api/sync/events?afterSequence=" + lastSyncedSequence.get();
 
-            @SuppressWarnings("unchecked")
             SyncEvent[] events = restTemplate.getForObject(url, SyncEvent[].class);
 
             if (events != null && events.length > 0) {
@@ -141,5 +140,12 @@ public class SyncService {
 
     private void updateLastSyncedSequence(long sequence) {
         lastSyncedSequence.updateAndGet(current -> Math.max(current, sequence));
+    }
+
+    private static String normalizeUrl(String url) {
+        if (url != null && url.endsWith("/")) {
+            return url.substring(0, url.length() - 1);
+        }
+        return url;
     }
 }

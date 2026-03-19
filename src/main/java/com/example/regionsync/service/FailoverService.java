@@ -69,7 +69,7 @@ public class FailoverService {
         }
 
         try {
-            String url = masterUrl.replaceAll("/$", "") + "/api/sync/status";
+            String url = normalizeUrl(masterUrl) + "/api/sync/status";
             RegionInfo masterInfo = restTemplate.getForObject(url, RegionInfo.class);
 
             if (masterInfo != null && masterInfo.isHealthy()) {
@@ -122,7 +122,7 @@ public class FailoverService {
 
         for (String slaveUrl : slaveUrls) {
             try {
-                String url = slaveUrl.replaceAll("/$", "") + "/api/sync/status";
+                String url = normalizeUrl(slaveUrl) + "/api/sync/status";
                 RegionInfo slaveInfo = restTemplate.getForObject(url, RegionInfo.class);
 
                 boolean healthy = slaveInfo != null && slaveInfo.isHealthy();
@@ -161,5 +161,12 @@ public class FailoverService {
      */
     public int getMasterFailureCount() {
         return masterFailureCount.get();
+    }
+
+    private static String normalizeUrl(String url) {
+        if (url != null && url.endsWith("/")) {
+            return url.substring(0, url.length() - 1);
+        }
+        return url;
     }
 }
