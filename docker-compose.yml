@@ -15,7 +15,7 @@
 #   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
 #   │  NA Region   │   │  EU Region   │   │  CN Region   │
 #   │ ┌──────────┐ │   │ ┌──────────┐ │   │ ┌──────────┐ │
-#   │ │ App:8081 │ │   │ │ App:8082 │ │   │ │ App:8083 │ │
+#   │ │ App:8081 │ │   │ │ App:8082 │ │   │ │ App:8084 │ │
 #   │ │ MySQL-NA │ │   │ │ MySQL-EU │ │   │ │ MySQL-CN │ │
 #   │ └──────────┘ │   │ └──────────┘ │   │ └──────────┘ │
 #   └──────────────┘   └──────────────┘   └──────────────┘
@@ -36,7 +36,7 @@
 #        -d '{"bizKey":"eu-fin-001","name":"FinanceEU","address":"London","industry":"Finance","category":"JOB","ownerRegion":"EU"}'
 #
 #   3. 在 CN 查看已同步的数据:
-#      curl http://localhost:8083/api/company/na-tech-001
+#      curl http://localhost:8084/api/company/na-tech-001
 #
 #   4. 查看同步事件日志:
 #      curl http://localhost:8081/api/company/sync-logs
