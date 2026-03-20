@@ -126,6 +126,74 @@ public class RegionWriteRouter {
         restTemplate.delete(url);
     }
 
+    // ═══════════════════════════════════════════════════════════
+    //  Company API 转发方法（转发到 /api/company 端点）
+    // ═══════════════════════════════════════════════════════════
+
+    /**
+     * 将 Company 创建操作转发到数据归属的 Master Region。
+     */
+    public Map<?, ?> forwardCompanyCreate(DataCategory category, String ownerRegion, Map<String, String> requestBody) {
+        String targetRegion = resolveTargetRegion(category, ownerRegion);
+        String targetUrl = regionConfig.getPeerUrl(targetRegion);
+
+        if (targetUrl == null) {
+            throw new IllegalStateException(
+                    "Cannot forward write: no URL configured for region [" + targetRegion + "]");
+        }
+
+        String url = normalizeUrl(targetUrl) + "/api/company";
+        log.info("Forwarding Company CREATE to master region [{}]: url={}", targetRegion, url);
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        HttpEntity<Map<String, String>> entity = new HttpEntity<>(requestBody, headers);
+
+        ResponseEntity<Map> response = restTemplate.postForEntity(url, entity, Map.class);
+        return response.getBody();
+    }
+
+    /**
+     * 将 Company 更新操作转发到数据归属的 Master Region。
+     */
+    public Map<?, ?> forwardCompanyUpdate(DataCategory category, String ownerRegion,
+                                          String bizKey, Map<String, String> requestBody) {
+        String targetRegion = resolveTargetRegion(category, ownerRegion);
+        String targetUrl = regionConfig.getPeerUrl(targetRegion);
+
+        if (targetUrl == null) {
+            throw new IllegalStateException(
+                    "Cannot forward write: no URL configured for region [" + targetRegion + "]");
+        }
+
+        String url = normalizeUrl(targetUrl) + "/api/company/" + bizKey;
+        log.info("Forwarding Company UPDATE to master region [{}]: url={}", targetRegion, url);
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        HttpEntity<Map<String, String>> entity = new HttpEntity<>(requestBody, headers);
+
+        restTemplate.put(url, entity);
+        return restTemplate.getForObject(url, Map.class);
+    }
+
+    /**
+     * 将 Company 删除操作转发到数据归属的 Master Region。
+     */
+    public void forwardCompanyDelete(DataCategory category, String ownerRegion, String bizKey) {
+        String targetRegion = resolveTargetRegion(category, ownerRegion);
+        String targetUrl = regionConfig.getPeerUrl(targetRegion);
+
+        if (targetUrl == null) {
+            throw new IllegalStateException(
+                    "Cannot forward delete: no URL configured for region [" + targetRegion + "]");
+        }
+
+        String url = normalizeUrl(targetUrl) + "/api/company/" + bizKey;
+        log.info("Forwarding Company DELETE to master region [{}]: url={}", targetRegion, url);
+        restTemplate.delete(url);
+    }
+
     /**
      * 解析目标 Region ID。
      * 对于全局固定 Master 的类型（SYSTEM_CONFIG, ROLE_PERMISSION），返回 categoryOwnerMap 中的值。

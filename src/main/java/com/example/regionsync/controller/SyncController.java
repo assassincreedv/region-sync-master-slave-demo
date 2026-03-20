@@ -1,9 +1,11 @@
 package com.example.regionsync.controller;
 
 import com.example.regionsync.config.RegionConfig;
+import com.example.regionsync.kafka.KafkaProducerService;
 import com.example.regionsync.model.DataCategory;
 import com.example.regionsync.model.RegionInfo;
 import com.example.regionsync.model.SyncEvent;
+import com.example.regionsync.service.CompanyService;
 import com.example.regionsync.service.SyncService;
 import com.example.regionsync.store.InMemoryDataStore;
 import org.slf4j.Logger;
@@ -34,14 +36,19 @@ public class SyncController {
     private final SyncService syncService;
     private final RegionConfig regionConfig;
     private final InMemoryDataStore dataStore;
+    private final CompanyService companyService;
+    private final KafkaProducerService kafkaProducerService;
 
     private final long startTime = System.currentTimeMillis();
 
     public SyncController(SyncService syncService, RegionConfig regionConfig,
-                          InMemoryDataStore dataStore) {
+                          InMemoryDataStore dataStore, CompanyService companyService,
+                          KafkaProducerService kafkaProducerService) {
         this.syncService = syncService;
         this.regionConfig = regionConfig;
         this.dataStore = dataStore;
+        this.companyService = companyService;
+        this.kafkaProducerService = kafkaProducerService;
     }
 
     /**
@@ -81,10 +88,13 @@ public class SyncController {
             ownership.put(cat.name(), masterRegion + (isLocal ? " (LOCAL MASTER)" : " (SLAVE)"));
         }
 
+        // 使用数据库中的数据总数
+        long dbItemCount = companyService.getItemCount();
+
         RegionInfo info = new RegionInfo(
                 regionConfig.getId(),
-                dataStore.getItemCount(),
-                syncService.getCurrentSequence(),
+                dbItemCount,
+                kafkaProducerService.getCurrentSequence(),
                 System.currentTimeMillis() - startTime,
                 true,
                 ownership
