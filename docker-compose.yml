@@ -1,0 +1,304 @@
+# ═══════════════════════════════════════════════════════════
+#  Multi-Region Data Ownership Demo (按数据归属划分 Master)
+#  含 MySQL + Kafka + Debezium CDC
+# ═══════════════════════════════════════════════════════════
+#
+# 架构:
+#   ┌────────────────────────────────────────────────────────────┐
+#   │                    Shared Infrastructure                    │
+#   │  ┌──────────┐  ┌──────────┐  ┌─────────────────────────┐  │
+#   │  │Zookeeper │  │  Kafka   │  │  Debezium Connect       │  │
+#   │  └──────────┘  └──────────┘  │  (CDC: MySQL → Kafka)   │  │
+#   │                              └─────────────────────────┘  │
+#   └────────────────────────────────────────────────────────────┘
+#
+#   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+#   │  NA Region   │   │  EU Region   │   │  CN Region   │
+#   │ ┌──────────┐ │   │ ┌──────────┐ │   │ ┌──────────┐ │
+#   │ │ App:8081 │ │   │ │ App:8082 │ │   │ │ App:8084 │ │
+#   │ │ MySQL-NA │ │   │ │ MySQL-EU │ │   │ │ MySQL-CN │ │
+#   │ └──────────┘ │   │ └──────────┘ │   │ └──────────┘ │
+#   └──────────────┘   └──────────────┘   └──────────────┘
+#
+# 同步流程:
+#   1. Master Region 写入本地 MySQL (company 表 + sync_event_log 表)
+#   2. 应用通过 KafkaProducerService 发布变更事件到 Kafka
+#   3. 其他 Region 的 KafkaConsumerService 消费事件并写入本地 MySQL
+#   4. Debezium 监听 MySQL binlog，将 CDC 事件发布到 Kafka（审计/监控）
+#
+# Test:
+#   1. 在 NA 创建 Company:
+#      curl -X POST http://localhost:8081/api/company -H "Content-Type: application/json" \
+#        -d '{"bizKey":"na-tech-001","name":"TechCorp","address":"NYC","industry":"Technology","category":"JOB","ownerRegion":"NA"}'
+#
+#   2. 在 EU 创建 Company:
+#      curl -X POST http://localhost:8082/api/company -H "Content-Type: application/json" \
+#        -d '{"bizKey":"eu-fin-001","name":"FinanceEU","address":"London","industry":"Finance","category":"JOB","ownerRegion":"EU"}'
+#
+#   3. 在 CN 查看已同步的数据:
+#      curl http://localhost:8084/api/company/na-tech-001
+#
+#   4. 查看同步事件日志:
+#      curl http://localhost:8081/api/company/sync-logs
+#
+#   5. 注册 Debezium connector:
+#      ./debezium/register-connectors.sh
+
+services:
+
+  # ═══════════════════════════════════════════════════════════
+  #  基础设施: Zookeeper + Kafka + Debezium
+  # ═══════════════════════════════════════════════════════════
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - region-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    depends_on:
+      - zookeeper
+    networks:
+      - region-network
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ═══════════════════════════════════════════════════════════
+  #  数据库: 每个 Region 一个独立的 MySQL 实例
+  # ═══════════════════════════════════════════════════════════
+
+  mysql-na:
+    image: mysql:8.0
+    container_name: mysql-na
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: region_db
+    command: --server-id=1 --log-bin=mysql-bin --binlog-format=ROW --binlog-row-image=FULL --gtid-mode=ON --enforce-gtid-consistency=ON
+    volumes:
+      - mysql-na-data:/var/lib/mysql
+    networks:
+      - region-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mysql-eu:
+    image: mysql:8.0
+    container_name: mysql-eu
+    ports:
+      - "3307:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: region_db
+    command: --server-id=2 --log-bin=mysql-bin --binlog-format=ROW --binlog-row-image=FULL --gtid-mode=ON --enforce-gtid-consistency=ON
+    volumes:
+      - mysql-eu-data:/var/lib/mysql
+    networks:
+      - region-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mysql-cn:
+    image: mysql:8.0
+    container_name: mysql-cn
+    ports:
+      - "3308:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: region_db
+    command: --server-id=3 --log-bin=mysql-bin --binlog-format=ROW --binlog-row-image=FULL --gtid-mode=ON --enforce-gtid-consistency=ON
+    volumes:
+      - mysql-cn-data:/var/lib/mysql
+    networks:
+      - region-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ═══════════════════════════════════════════════════════════
+  #  Debezium Connect — CDC 变更数据捕获
+  # ═══════════════════════════════════════════════════════════
+
+  debezium:
+    image: debezium/connect:2.5
+    container_name: debezium
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: debezium-connect
+      CONFIG_STORAGE_TOPIC: debezium_configs
+      OFFSET_STORAGE_TOPIC: debezium_offsets
+      STATUS_STORAGE_TOPIC: debezium_statuses
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mysql-na:
+        condition: service_healthy
+      mysql-eu:
+        condition: service_healthy
+      mysql-cn:
+        condition: service_healthy
+    networks:
+      - region-network
+
+  # ═══════════════════════════════════════════════════════════
+  #  Region 应用节点
+  # ═══════════════════════════════════════════════════════════
+
+  region-na:
+    build: .
+    container_name: region-na
+    ports:
+      - "8081:8080"
+    environment:
+      - SERVER_PORT=8080
+      - REGION_ID=NA
+      - REGION_CATEGORY_OWNER_MAP_SYSTEM_CONFIG=NA
+      - REGION_CATEGORY_OWNER_MAP_ROLE_PERMISSION=NA
+      - REGION_CATEGORY_OWNER_MAP_JOB=REGIONAL
+      - REGION_CATEGORY_OWNER_MAP_TALENT=REGIONAL
+      - REGION_CATEGORY_OWNER_MAP_FINANCE=REGIONAL
+      - REGION_PEER_URLS_EU=http://region-eu:8080
+      - REGION_PEER_URLS_CN=http://region-cn:8080
+      - SYNC_INTERVAL_MS=3000
+      # MySQL
+      - MYSQL_HOST=mysql-na
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=region_db
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=root
+      # Kafka
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      # Debezium CDC consumer
+      - DEBEZIUM_TOPIC=dbserver-na.region_db.company
+      - DEBEZIUM_CONSUMER_ENABLED=true
+    networks:
+      - region-network
+    depends_on:
+      mysql-na:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  region-eu:
+    build: .
+    container_name: region-eu
+    ports:
+      - "8082:8080"
+    environment:
+      - SERVER_PORT=8080
+      - REGION_ID=EU
+      - REGION_CATEGORY_OWNER_MAP_SYSTEM_CONFIG=NA
+      - REGION_CATEGORY_OWNER_MAP_ROLE_PERMISSION=NA
+      - REGION_CATEGORY_OWNER_MAP_JOB=REGIONAL
+      - REGION_CATEGORY_OWNER_MAP_TALENT=REGIONAL
+      - REGION_CATEGORY_OWNER_MAP_FINANCE=REGIONAL
+      - REGION_PEER_URLS_NA=http://region-na:8080
+      - REGION_PEER_URLS_CN=http://region-cn:8080
+      - SYNC_INTERVAL_MS=3000
+      # MySQL
+      - MYSQL_HOST=mysql-eu
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=region_db
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=root
+      # Kafka
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      # Debezium CDC consumer
+      - DEBEZIUM_TOPIC=dbserver-eu.region_db.company
+      - DEBEZIUM_CONSUMER_ENABLED=true
+    networks:
+      - region-network
+    depends_on:
+      mysql-eu:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      region-na:
+        condition: service_healthy
+
+  region-cn:
+    build: .
+    container_name: region-cn
+    ports:
+      - "8084:8080"
+    environment:
+      - SERVER_PORT=8080
+      - REGION_ID=CN
+      - REGION_CATEGORY_OWNER_MAP_SYSTEM_CONFIG=NA
+      - REGION_CATEGORY_OWNER_MAP_ROLE_PERMISSION=NA
+      - REGION_CATEGORY_OWNER_MAP_JOB=REGIONAL
+      - REGION_CATEGORY_OWNER_MAP_TALENT=REGIONAL
+      - REGION_CATEGORY_OWNER_MAP_FINANCE=REGIONAL
+      - REGION_PEER_URLS_NA=http://region-na:8080
+      - REGION_PEER_URLS_EU=http://region-eu:8080
+      - SYNC_INTERVAL_MS=3000
+      # MySQL
+      - MYSQL_HOST=mysql-cn
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=region_db
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=root
+      # Kafka
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      # Debezium CDC consumer
+      - DEBEZIUM_TOPIC=dbserver-cn.region_db.company
+      - DEBEZIUM_CONSUMER_ENABLED=true
+    networks:
+      - region-network
+    depends_on:
+      mysql-cn:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      region-na:
+        condition: service_healthy
+
+networks:
+  region-network:
+    driver: bridge
+
+volumes:
+  mysql-na-data:
+  mysql-eu-data:
+  mysql-cn-data:
